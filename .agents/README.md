@@ -6,6 +6,8 @@ For an existing game project, `python tools/install_codex_user.py` previews a us
 
 On Codex 0.165.0 an ephemeral session cannot currently inherit parent turns via the default fork path. A documented fallback is in `ccgs-agent-router`; it does not create a transcript or fix the upstream runtime. Use a normal session when inherited history or a transcript-dependent hook is required. The `.claude` hooks are not automatically installed as Codex hooks.
 
+A separately maintained, version-specific runtime patch and its verification limits are described in [`../patches/README.md`](../patches/README.md). It is not installed by the studio installer.
+
 最后更新：2026-04-17
 
 这个目录把仓库从 “Claude-first” 变成 “Codex 也能直接消费” 的版本，但不复制维护整套工作流。

@@ -1,0 +1,158 @@
+diff --git a/codex-rs/core/src/agent/control/runtime_context.rs b/codex-rs/core/src/agent/control/runtime_context.rs
+index d4f8f9b..846fb00 100644
+--- a/codex-rs/core/src/agent/control/runtime_context.rs
++++ b/codex-rs/core/src/agent/control/runtime_context.rs
+@@ -130,7 +130,7 @@ impl LocalAgentRuntime {
+         Ok(descendants)
+     }
+ 
+-    pub(super) fn upgrade(&self) -> CodexResult<Arc<ThreadManagerState>> {
++    pub(crate) fn upgrade(&self) -> CodexResult<Arc<ThreadManagerState>> {
+         self.manager.upgrade().ok_or_else(|| {
+             CodexErr::UnsupportedOperation("thread manager dropped".to_string())
+                 .with_agent_context(AgentErrorContext::ManagerUnavailable)
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 22cd725..d202e38 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -1113,7 +1113,8 @@ impl LocalAgentControl {
+             (MultiAgentVersion::Disabled | MultiAgentVersion::V1, _)
+             | (MultiAgentVersion::V2, _) => (None, None),
+         };
+-        let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
++        let parent_config_snapshot = parent_thread.config_snapshot().await;
++        let parent_history_mode = parent_config_snapshot.history_mode;
+         // `record_conversation_items` only queues persistence writes asynchronously.
+         // Flush before snapshotting store history for a fork.
+         parent_thread.ensure_rollout_materialized().await;
+@@ -1121,7 +1122,11 @@ impl LocalAgentControl {
+ 
+         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
+             .then_some(ThreadHistoryMode::Paginated);
+-        let mut forked_rollout_items =
++        let mut forked_rollout_items = if parent_config_snapshot.ephemeral {
++            // Ephemeral parents have no persisted rollout. The existing in-memory fork
++            // checkpoint retains annotated context, compaction and guardian metadata.
++            parent_thread.session.guardian_fork_history().await
++        } else {
+             load_agent_model_context(state, parent_thread_id, parent_history_mode)
+                 .await?
+                 .ok_or_else(|| {
+@@ -1129,7 +1134,8 @@ impl LocalAgentControl {
+                         "parent thread history unavailable for fork: {parent_thread_id}"
+                     ))
+                 })?
+-                .items;
++                .items
++        };
+ 
+         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
+             if multi_agent_version == MultiAgentVersion::V2 {
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 5902723..a444b6f 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -2276,6 +2276,43 @@ async fn ephemeral_spawn_does_not_persist_agent_graph_edge() {
+     );
+ }
+ 
++#[tokio::test]
++async fn ephemeral_parent_full_history_fork_keeps_live_context_without_rollout() {
++    let (home, mut config) = test_config().await;
++    config.ephemeral = true;
++    let harness = AgentControlHarness::new_with_config(home, config).await;
++    let (parent_thread_id, parent) = harness.start_thread().await;
++    parent
++        .inject_response_items(vec![user_message("ephemeral inheritance marker")])
++        .await
++        .expect("inject parent context");
++    assert!(parent.rollout_path().is_none());
++    let child_id = harness
++        .spawn_anonymous_child(
++            parent_thread_id,
++            SpawnAgentOptions {
++                parent_thread_id: Some(parent_thread_id),
++                fork_parent_spawn_call_id: Some("ephemeral-spawn-call".to_string()),
++                fork_mode: Some(SpawnAgentForkMode::FullHistory),
++                ..Default::default()
++            },
++        )
++        .await;
++    let child = harness
++        .manager
++        .get_thread(child_id)
++        .await
++        .expect("child exists");
++    assert!(history_contains_text(
++        child.session.clone_history().await.raw_items(),
++        "ephemeral inheritance marker"
++    ));
++    assert!(
++        parent.rollout_path().is_none(),
++        "ephemeral parent must stay unpersisted"
++    );
++}
++
+ /// New children inherit omitted plugin choices independently of copied history;
+ /// explicit choices, including an empty list, override the parent's selection.
+ #[test_case::test_case(None, None, vec!["parent-plugin".to_string()]; "fresh inherits")]
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+index 3dde6e1..1e3c6a3 100644
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -388,24 +388,37 @@ pub(crate) async fn run_turn_stop_hooks(
+         }) => {
+             let context = subagent_hook_context(sess, agent_role);
+             let agent_transcript_path = sess.hook_transcript_path().await;
+-            let parent_transcript_path = match sess
+-                .services
+-                .thread_store
+-                .read_thread(ReadThreadParams {
+-                    thread_id: *parent_thread_id,
+-                    include_archived: true,
+-                    include_history: false,
+-                })
+-                .await
+-            {
+-                Ok(thread) => thread.rollout_path,
+-                Err(error) => {
+-                    tracing::warn!(
+-                        parent_thread_id = %parent_thread_id,
+-                        error = %error,
+-                        "failed to resolve parent transcript path for subagent hook"
+-                    );
+-                    None
++            // A live ephemeral parent intentionally has no on-disk transcript.
++            // Do not misreport this expected state as a failed store lookup.
++            let ephemeral_parent = match sess.services.local_agent_runtime.upgrade() {
++                Ok(manager) => match manager.get_thread(*parent_thread_id).await {
++                    Ok(parent) => parent.config_snapshot().await.ephemeral,
++                    Err(_) => false,
++                },
++                Err(_) => false,
++            };
++            let parent_transcript_path = if ephemeral_parent {
++                None
++            } else {
++                match sess
++                    .services
++                    .thread_store
++                    .read_thread(ReadThreadParams {
++                        thread_id: *parent_thread_id,
++                        include_archived: true,
++                        include_history: false,
++                    })
++                    .await
++                {
++                    Ok(thread) => thread.rollout_path,
++                    Err(error) => {
++                        tracing::warn!(
++                            parent_thread_id = %parent_thread_id,
++                            error = %error,
++                            "failed to resolve parent transcript path for subagent hook"
++                        );
++                        None
++                    }
+                 }
+             };
+             (
