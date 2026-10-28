@@ -1,5 +1,11 @@
 # Codex Adapter Layer
 
+## User-wide Codex installation
+
+For an existing game project, `python tools/install_codex_user.py` previews a user-wide installation; add `--apply` to create it. Python 3.11+ and PyYAML are required. The installer preserves the canonical `.claude` references, installs one `game-studio` router and 49 namespaced `gs_*` custom-agent definitions, and refuses to overwrite existing files. It does not modify the game project, Codex config, or hook trust. Restart Codex or open a new session to discover the new entries. Use `$game-studio team-ui ...` or request a specialist by name.
+
+On Codex 0.165.0 an ephemeral session cannot currently inherit parent turns via the default fork path. A documented fallback is in `ccgs-agent-router`; it does not create a transcript or fix the upstream runtime. Use a normal session when inherited history or a transcript-dependent hook is required. The `.claude` hooks are not automatically installed as Codex hooks.
+
 最后更新：2026-04-17
 
 这个目录把仓库从 “Claude-first” 变成 “Codex 也能直接消费” 的版本，但不复制维护整套工作流。

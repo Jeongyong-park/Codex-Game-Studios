@@ -29,6 +29,7 @@ This skill adapts the original CCGS agent roster for Codex.
   - `Bash` -> `exec_command`
   - `WebSearch` -> `web` or Context7
 - If the agent spec conflicts with `AGENTS.md`, follow `AGENTS.md`.
+- In an unpatched Codex 0.165.0 ephemeral session, inheriting parent turns can fail with `no rollout found`. If delegation is authorized, retry once with `fork_turns="none"` and include all necessary task and project context explicitly. The child will not inherit the parent conversation. An ephemeral parent also has no transcript file for hooks; do not assume the hook received one or silence hook failures.
 
 ## Common Mappings
 
